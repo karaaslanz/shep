@@ -20,7 +20,7 @@ import type { FastFeatureAgentGraphDeps } from './fast-feature-agent-graph.js';
 import { createExplorationAgentGraph } from './exploration-agent-graph.js';
 import type { ExplorationAgentGraphDeps } from './exploration-agent-graph.js';
 import { createCheckpointer } from '../common/checkpointer.js';
-import { getFeatureCheckpointPath } from '@/application/services/checkpoint-paths.js';
+import type { IAgentCheckpointService } from '@/application/ports/output/agents/agent-checkpoint-service.interface.js';
 import type { IAgentRunRepository } from '@/application/ports/output/agents/agent-run-repository.interface.js';
 import type { IAgentExecutorProvider } from '@/application/ports/output/agents/agent-executor-provider.interface.js';
 import type { IAgentExecutorFactory } from '@/application/ports/output/agents/agent-executor-factory.interface.js';
@@ -354,7 +354,8 @@ export async function runWorker(args: WorkerArgs): Promise<void> {
   // Use threadId for checkpoint path so resume runs share the same checkpoint DB.
   // Falls back to runId for backwards compatibility with existing runs.
   const checkpointId = args.threadId ?? args.runId;
-  const checkpointPath = getFeatureCheckpointPath(checkpointId);
+  const checkpointService = container.resolve<IAgentCheckpointService>('IAgentCheckpointService');
+  const checkpointPath = checkpointService.getFeatureCheckpointPath(checkpointId);
   log(`Creating checkpointer at ${checkpointPath} (thread: ${checkpointId})`);
   const checkpointer = createCheckpointer(checkpointPath);
   // All graph factories return compiled graphs with identical FeatureAgentAnnotation

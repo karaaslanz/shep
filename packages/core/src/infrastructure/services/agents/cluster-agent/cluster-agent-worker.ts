@@ -15,7 +15,7 @@ import { initializeContainer, container } from '@/infrastructure/di/container.js
 import { createClusterAgentGraph } from './cluster-agent-graph.js';
 import type { ClusterAgentDeps } from './cluster-agent-deps.js';
 import { createCheckpointer } from '../common/checkpointer.js';
-import { getClusterCheckpointPath } from '@/application/services/checkpoint-paths.js';
+import type { IAgentCheckpointService } from '@/application/ports/output/agents/agent-checkpoint-service.interface.js';
 import type { IClusterRepository } from '@/application/ports/output/repositories/cluster-repository.interface.js';
 import type { IK3dService } from '@/application/ports/output/services/k3d-service.interface.js';
 import type { IKubectlService } from '@/application/ports/output/services/kubectl-service.interface.js';
@@ -137,7 +137,8 @@ export async function runClusterWorker(args: ClusterWorkerArgs): Promise<void> {
 
   // Use threadId for checkpoint path so resume runs share the same checkpoint DB.
   const checkpointId = args.threadId ?? args.runId;
-  const checkpointPath = getClusterCheckpointPath(checkpointId);
+  const checkpointService = container.resolve<IAgentCheckpointService>('IAgentCheckpointService');
+  const checkpointPath = checkpointService.getClusterCheckpointPath(checkpointId);
   log(`Creating checkpointer at ${checkpointPath} (thread: ${checkpointId})`);
 
   // Start heartbeat
