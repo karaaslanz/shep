@@ -13,6 +13,7 @@ import { DeleteFeatureUseCase } from '@/application/use-cases/features/delete-fe
 import type { IFeatureRepository } from '@/application/ports/output/repositories/feature-repository.interface.js';
 import type { IWorktreeService } from '@/application/ports/output/services/worktree-service.interface.js';
 import type { IFeatureAgentProcessService } from '@/application/ports/output/agents/feature-agent-process.interface.js';
+import type { IAgentCheckpointService } from '@/application/ports/output/agents/agent-checkpoint-service.interface.js';
 import type { IAgentRunRepository } from '@/application/ports/output/agents/agent-run-repository.interface.js';
 import type { IGitPrService } from '@/application/ports/output/services/git-pr-service.interface.js';
 import {
@@ -72,6 +73,7 @@ describe('DeleteFeatureUseCase', () => {
   let mockFeatureRepo: IFeatureRepository;
   let mockWorktreeService: IWorktreeService;
   let mockProcessService: IFeatureAgentProcessService;
+  let mockCheckpointService: IAgentCheckpointService;
   let mockRunRepo: IAgentRunRepository;
   let mockGitPrService: IGitPrService;
 
@@ -109,6 +111,12 @@ describe('DeleteFeatureUseCase', () => {
       checkAndMarkCrashed: vi.fn(),
     };
 
+    mockCheckpointService = {
+      getFeatureCheckpointPath: vi.fn().mockReturnValue('/tmp/checkpoints/thread-1.db'),
+      getClusterCheckpointPath: vi.fn().mockReturnValue('/tmp/checkpoints/cluster-run-1.db'),
+      removeFeatureCheckpoint: vi.fn().mockResolvedValue(undefined),
+    };
+
     mockRunRepo = {
       create: vi.fn(),
       findById: vi.fn().mockResolvedValue(null),
@@ -139,6 +147,7 @@ describe('DeleteFeatureUseCase', () => {
       mockFeatureRepo,
       mockWorktreeService,
       mockProcessService,
+      mockCheckpointService,
       mockRunRepo,
       mockGitPrService
     );
@@ -198,6 +207,17 @@ describe('DeleteFeatureUseCase', () => {
     expect(killSpy).toHaveBeenCalledWith(12345);
     expect(mockRunRepo.updateStatus).toHaveBeenCalledWith('run-1', AgentRunStatus.cancelled);
     killSpy.mockRestore();
+  });
+
+  it('should clean up the configured checkpoint for an agent run', async () => {
+    const feature = createMockFeature({ agentRunId: 'run-1' });
+    const run = createMockAgentRun({ threadId: 'thread-cleanup' });
+    mockFeatureRepo.findById = vi.fn().mockResolvedValue(feature);
+    mockRunRepo.findById = vi.fn().mockResolvedValue(run);
+
+    await useCase.execute('feat-123-full-uuid');
+
+    expect(mockCheckpointService.removeFeatureCheckpoint).toHaveBeenCalledWith('thread-cleanup');
   });
 
   it('should cancel a pending agent run before deletion', async () => {
