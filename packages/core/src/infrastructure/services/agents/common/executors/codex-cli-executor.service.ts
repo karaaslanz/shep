@@ -46,6 +46,19 @@ const FATAL_STDERR_PATTERNS = [
   /RESOURCE_EXHAUSTED/i,
 ];
 
+const WINDOWS_PROMPT_TOKEN = '__SHEP_CODEX_PROMPT__';
+const WINDOWS_CODEX_WRAPPER = [
+  '$a = ConvertFrom-Json $env:SHEP_CODEX_ARGS_JSON',
+  '$p = Get-Content -Raw -LiteralPath $env:SHEP_CODEX_PROMPT_FILE',
+  'for ($i = 0; $i -lt $a.Count; $i++) { if ($a[$i] -eq \'__SHEP_CODEX_PROMPT__\') { $a[$i] = $p } }',
+  '$env:SHEP_CODEX_ARGS_JSON = $null',
+  '$env:SHEP_CODEX_PROMPT_FILE = $null',
+  '$wasResume = $env:SHEP_CODEX_RESUME',
+  '$env:SHEP_CODEX_RESUME = $null',
+  'if ($wasResume -eq \'1\') { & codex @a } else { $p | & codex @a }',
+  'exit $LASTEXITCODE',
+].join('; ');
+
 /**
  * Executor service for OpenAI Codex CLI agent.
  * Uses subprocess spawning to interact with the `codex` CLI.
@@ -77,6 +90,7 @@ export class CodexCliExecutorService implements IAgentExecutor {
     const isResume = !!options?.resumeSession;
 
     let tempSchemaPath: string | undefined;
+    let tempPromptPath: string | undefined;
     try {
       if (options?.outputSchema) {
         tempSchemaPath = path.join(
@@ -94,7 +108,9 @@ export class CodexCliExecutorService implements IAgentExecutor {
       );
       this.log(`Spawn cwd: ${(spawnOpts.cwd as string) ?? '(inherited)'}`);
 
-      const proc = this.spawn('codex', args, spawnOpts);
+      const spawned = this.spawnCodex(prompt, args, spawnOpts, isResume);
+      const proc = spawned.proc;
+      tempPromptPath = spawned.tempPromptPath;
       this.log(`Subprocess PID: ${proc.pid ?? 'undefined (spawn may have failed)'}`);
       this.log(
         `Prompt length: ${prompt.length} chars${isResume ? ' (positional arg for resume)' : ' (piped via stdin)'}`
@@ -105,7 +121,7 @@ export class CodexCliExecutorService implements IAgentExecutor {
 
       // For initial executions, pipe the prompt via stdin.
       // For resume, the prompt is already in the CLI args.
-      if (!isResume && proc.stdin) {
+      if (!isResume && !tempPromptPath && proc.stdin) {
         proc.stdin.write(prompt);
         proc.stdin.end();
       }
@@ -220,14 +236,8 @@ export class CodexCliExecutorService implements IAgentExecutor {
         });
       });
     } finally {
-      // Clean up temp schema file
-      if (tempSchemaPath) {
-        try {
-          fs.unlinkSync(tempSchemaPath);
-        } catch {
-          // Best effort cleanup
-        }
-      }
+      this.cleanupTempFile(tempSchemaPath);
+      this.cleanupTempFile(tempPromptPath);
     }
   }
 
@@ -239,6 +249,7 @@ export class CodexCliExecutorService implements IAgentExecutor {
     const isResume = !!options?.resumeSession;
 
     let tempSchemaPath: string | undefined;
+    let tempPromptPath: string | undefined;
     try {
       if (options?.outputSchema) {
         tempSchemaPath = path.join(
@@ -250,11 +261,14 @@ export class CodexCliExecutorService implements IAgentExecutor {
 
       const args = this.buildArgs(prompt, options, tempSchemaPath);
       const spawnOpts = this.buildSpawnOptions(options);
-      const proc = this.spawn('codex', args, spawnOpts);
+      const spawned = this.spawnCodex(prompt, args, spawnOpts, isResume);
+      const proc = spawned.proc;
+      tempPromptPath = spawned.tempPromptPath;
 
-      // For initial executions, pipe the prompt via stdin.
-      // For resume, the prompt is already in the CLI args.
-      if (!isResume && proc.stdin) {
+      // POSIX initial executions pipe the prompt via stdin. On Windows the
+      // PowerShell wrapper reads it from a temp file so npm .cmd shims work
+      // without shell=true argument interpolation.
+      if (!isResume && !tempPromptPath && proc.stdin) {
         proc.stdin.write(prompt);
         proc.stdin.end();
       }
@@ -448,14 +462,8 @@ export class CodexCliExecutorService implements IAgentExecutor {
         yield item;
       }
     } finally {
-      // Clean up temp schema file
-      if (tempSchemaPath) {
-        try {
-          fs.unlinkSync(tempSchemaPath);
-        } catch {
-          // Best effort cleanup
-        }
-      }
+      this.cleanupTempFile(tempSchemaPath);
+      this.cleanupTempFile(tempPromptPath);
     }
   }
 
@@ -610,6 +618,72 @@ export class CodexCliExecutorService implements IAgentExecutor {
       if (line.length > 0) {
         this.log(`[raw] ${line}`);
       }
+    }
+  }
+
+  /**
+   * Spawn Codex in a way that also works with the npm-generated Windows shim.
+   *
+   * npm exposes Codex as codex.cmd on Windows. Node spawn() with shell=false
+   * cannot execute that shim directly, while shell=true would interpolate
+   * user-controlled arguments. Keep POSIX direct-exec behavior unchanged and
+   * use a fixed PowerShell wrapper on Windows. Arguments travel through JSON
+   * environment data and prompts through a temp file, so neither is embedded
+   * in the shell command string.
+   */
+  private spawnCodex(
+    prompt: string,
+    args: string[],
+    spawnOpts: Record<string, unknown>,
+    isResume: boolean
+  ): { proc: ReturnType<SpawnFunction>; tempPromptPath?: string } {
+    if (process.platform !== 'win32') {
+      return { proc: this.spawn('codex', args, spawnOpts) };
+    }
+
+    const tempPromptPath = path.join(
+      os.tmpdir(),
+      `shep-codex-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`
+    );
+    fs.writeFileSync(tempPromptPath, prompt, 'utf8');
+
+    const wrapperArgs = [...args];
+    if (isResume) {
+      // buildArgs() emits: exec, resume, <thread>, <prompt>, ...flags
+      wrapperArgs[3] = WINDOWS_PROMPT_TOKEN;
+    }
+
+    const env = {
+      ...((spawnOpts.env as NodeJS.ProcessEnv | undefined) ?? process.env),
+      SHEP_CODEX_ARGS_JSON: JSON.stringify(wrapperArgs),
+      SHEP_CODEX_PROMPT_FILE: tempPromptPath,
+      SHEP_CODEX_RESUME: isResume ? '1' : '0',
+    };
+
+    try {
+      const proc = this.spawn(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_CODEX_WRAPPER],
+        {
+          ...spawnOpts,
+          windowsHide: true,
+          env,
+        }
+      );
+      if (proc.stdin) proc.stdin.end();
+      return { proc, tempPromptPath };
+    } catch (error) {
+      this.cleanupTempFile(tempPromptPath);
+      throw error;
+    }
+  }
+
+  private cleanupTempFile(filePath?: string): void {
+    if (!filePath) return;
+    try {
+      fs.unlinkSync(filePath);
+    } catch {
+      // Best effort cleanup
     }
   }
 
