@@ -232,8 +232,6 @@ export class CodexCliExecutorService implements IAgentExecutor {
     options?: AgentExecutionOptions
   ): AsyncIterable<AgentExecutionStreamEvent> {
     this.silent = options?.silent ?? false;
-    const isResume = !!options?.resumeSession;
-
     let tempSchemaPath: string | undefined;
     try {
       if (options?.outputSchema) {
