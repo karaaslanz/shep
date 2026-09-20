@@ -103,9 +103,9 @@ export class CodexCliExecutorService implements IAgentExecutor {
       const promptPreview = prompt.length > 500 ? `${prompt.slice(0, 497)}...` : prompt;
       this.log(`[text] Prompt: ${promptPreview.replace(/\n/g, ' ')}`);
 
-      // For initial executions, pipe the prompt via stdin.
-      // For resume, the prompt is already in the CLI args.
-      if (!isResume && proc.stdin) {
+      // Codex accepts "-" for both initial and resumed prompts, so keep
+      // user input out of CLI arguments and pipe it through stdin.
+      if (proc.stdin) {
         proc.stdin.write(prompt);
         proc.stdin.end();
       }
@@ -252,9 +252,9 @@ export class CodexCliExecutorService implements IAgentExecutor {
       const spawnOpts = this.buildSpawnOptions(options);
       const proc = this.spawn('codex', args, spawnOpts);
 
-      // For initial executions, pipe the prompt via stdin.
-      // For resume, the prompt is already in the CLI args.
-      if (!isResume && proc.stdin) {
+      // Codex accepts "-" for both initial and resumed prompts, so keep
+      // user input out of CLI arguments and pipe it through stdin.
+      if (proc.stdin) {
         proc.stdin.write(prompt);
         proc.stdin.end();
       }
@@ -617,10 +617,14 @@ export class CodexCliExecutorService implements IAgentExecutor {
    * Build CLI arguments for codex exec.
    *
    * For initial execution: `codex exec - --json --sandbox danger-full-access ...`
-   * For resume: `codex exec resume <threadId> "prompt" --json --sandbox danger-full-access ...`
+   * For resume: `codex exec [flags] resume <threadId> -`
+   *
+   * Current Codex CLI treats `resume` as an exec subcommand. Exec-level
+   * flags such as --sandbox, --cd, and --color must appear before `resume`.
+   * A trailing `-` tells Codex to read the resumed prompt from stdin.
    */
   private buildArgs(
-    prompt: string,
+    _prompt: string,
     options?: AgentExecutionOptions,
     tempSchemaPath?: string
   ): string[] {
@@ -638,8 +642,7 @@ export class CodexCliExecutorService implements IAgentExecutor {
     if (tempSchemaPath) baseFlags.push('--output-schema', tempSchemaPath);
 
     if (options?.resumeSession) {
-      // Resume mode: codex exec resume <threadId> "prompt" [flags]
-      return ['exec', 'resume', options.resumeSession, prompt, ...baseFlags];
+      return ['exec', ...baseFlags, 'resume', options.resumeSession, '-'];
     }
 
     // Initial execution: codex exec - [flags]
