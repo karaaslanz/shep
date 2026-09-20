@@ -74,8 +74,6 @@ export class CodexCliExecutorService implements IAgentExecutor {
 
   async execute(prompt: string, options?: AgentExecutionOptions): Promise<AgentExecutionResult> {
     this.silent = options?.silent ?? false;
-    const isResume = !!options?.resumeSession;
-
     let tempSchemaPath: string | undefined;
     try {
       if (options?.outputSchema) {
@@ -96,9 +94,7 @@ export class CodexCliExecutorService implements IAgentExecutor {
 
       const proc = this.spawn('codex', args, spawnOpts);
       this.log(`Subprocess PID: ${proc.pid ?? 'undefined (spawn may have failed)'}`);
-      this.log(
-        `Prompt length: ${prompt.length} chars${isResume ? ' (positional arg for resume)' : ' (piped via stdin)'}`
-      );
+      this.log(`Prompt length: ${prompt.length} chars (piped via stdin)`);
       // Log the actual prompt for debugging (truncate very long prompts)
       const promptPreview = prompt.length > 500 ? `${prompt.slice(0, 497)}...` : prompt;
       this.log(`[text] Prompt: ${promptPreview.replace(/\n/g, ' ')}`);
