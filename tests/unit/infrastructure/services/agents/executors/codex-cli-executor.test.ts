@@ -8,7 +8,7 @@
  */
 
 import 'reflect-metadata';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import * as fs from 'node:fs';
@@ -103,6 +103,18 @@ function emitJsonlLines(
 describe('CodexCliExecutorService', () => {
   let mockSpawn: SpawnFunction;
   let executor: CodexCliExecutorService;
+  const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+
+  function setPlatform(platform: NodeJS.Platform) {
+    Object.defineProperty(process, 'platform', {
+      configurable: true,
+      value: platform,
+    });
+  }
+
+  afterEach(() => {
+    if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+  });
 
   beforeEach(() => {
     mockSpawn = vi.fn();
@@ -192,6 +204,86 @@ describe('CodexCliExecutorService', () => {
       // Prompt NOT in CLI args
       const spawnArgs = vi.mocked(mockSpawn).mock.calls[0][1] as string[];
       expect(spawnArgs).not.toContain('My big prompt');
+    });
+
+    it('should use a non-interpolating PowerShell wrapper for the npm Codex shim on Windows', async () => {
+      setPlatform('win32');
+      const mockProc = createMockChildProcess();
+      vi.mocked(mockSpawn).mockReturnValue(mockProc as any);
+      const prompt = "Do not interpolate '; $(Get-ChildItem)' into the shell command";
+      const stdinWriteSpy = vi.spyOn(mockProc.stdin, 'write');
+
+      const executePromise = executor.execute(prompt, {
+        model: 'gpt-5.6-sol',
+        silent: true,
+      });
+
+      const [command, powershellArgs, spawnOpts] = vi.mocked(mockSpawn).mock.calls[0];
+      expect(command).toBe('powershell.exe');
+      expect(powershellArgs).toEqual([
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        expect.stringContaining('ConvertFrom-Json'),
+      ]);
+
+      const env = (spawnOpts as Record<string, unknown>).env as Record<string, string>;
+      const codexArgs = JSON.parse(env.SHEP_CODEX_ARGS_JSON) as string[];
+      expect(codexArgs).toContain('exec');
+      expect(codexArgs).toContain('-');
+      expect(codexArgs).toContain('gpt-5.6-sol');
+      expect(env.SHEP_CODEX_ARGS_JSON).not.toContain(prompt);
+      expect(env.SHEP_CODEX_RESUME).toBe('0');
+      expect(fs.readFileSync(env.SHEP_CODEX_PROMPT_FILE, 'utf8')).toBe(prompt);
+      expect(stdinWriteSpy).not.toHaveBeenCalledWith(prompt);
+
+      emitJsonlLines(
+        mockProc,
+        [threadStarted('windows-thread'), agentMessageCompleted('OK'), turnCompleted()],
+        null,
+        0
+      );
+      await executePromise;
+
+      expect(fs.existsSync(env.SHEP_CODEX_PROMPT_FILE)).toBe(false);
+    });
+
+    it('should keep Windows resume prompts out of the PowerShell command and JSON args', async () => {
+      setPlatform('win32');
+      const mockProc = createMockChildProcess();
+      vi.mocked(mockSpawn).mockReturnValue(mockProc as any);
+      const prompt = "resume with spaces ; $env:PATH and 'quotes'";
+
+      const executePromise = executor.execute(prompt, {
+        resumeSession: 'thread-abc',
+        silent: true,
+      });
+
+      const [command, powershellArgs, spawnOpts] = vi.mocked(mockSpawn).mock.calls[0];
+      expect(command).toBe('powershell.exe');
+      expect((powershellArgs as string[]).join(' ')).not.toContain(prompt);
+
+      const env = (spawnOpts as Record<string, unknown>).env as Record<string, string>;
+      const codexArgs = JSON.parse(env.SHEP_CODEX_ARGS_JSON) as string[];
+      expect(codexArgs.slice(0, 4)).toEqual([
+        'exec',
+        'resume',
+        'thread-abc',
+        '__SHEP_CODEX_PROMPT__',
+      ]);
+      expect(env.SHEP_CODEX_ARGS_JSON).not.toContain(prompt);
+      expect(env.SHEP_CODEX_RESUME).toBe('1');
+      expect(fs.readFileSync(env.SHEP_CODEX_PROMPT_FILE, 'utf8')).toBe(prompt);
+
+      emitJsonlLines(
+        mockProc,
+        [threadStarted('thread-abc'), agentMessageCompleted('Resumed'), turnCompleted()],
+        null,
+        0
+      );
+      await executePromise;
+
+      expect(fs.existsSync(env.SHEP_CODEX_PROMPT_FILE)).toBe(false);
     });
 
     it('should parse JSONL to extract response text from agent_message events', async () => {
@@ -760,6 +852,21 @@ describe('CodexCliExecutorService', () => {
       await promise;
       return events;
     }
+
+    it('should use the Windows PowerShell shim wrapper in streaming mode', async () => {
+      setPlatform('win32');
+
+      const events = await streamWith(executor, {
+        lines: [threadStarted('t-win'), agentMessageCompleted('Done'), turnCompleted()],
+      });
+
+      expect(events).toContainEqual({ type: 'result', content: 'Done' });
+      const [command, , spawnOpts] = vi.mocked(mockSpawn).mock.calls[0];
+      expect(command).toBe('powershell.exe');
+      const env = (spawnOpts as Record<string, unknown>).env as Record<string, string>;
+      expect(env.SHEP_CODEX_RESUME).toBe('0');
+      expect(fs.existsSync(env.SHEP_CODEX_PROMPT_FILE)).toBe(false);
+    });
 
     it('should yield progress events for agent_message item.started', async () => {
       const events = await streamWith(executor, {
