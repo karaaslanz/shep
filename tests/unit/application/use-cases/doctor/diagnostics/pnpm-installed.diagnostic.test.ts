@@ -31,13 +31,7 @@ describe('PnpmInstalledDiagnostic', () => {
 
     expect(result.status).toBe(DiagnosticStatus.Ok);
     expect(result.detail).toContain('10.34.5');
-    expect(runner).toHaveBeenCalledWith('cmd.exe', [
-      '/d',
-      '/s',
-      '/c',
-      'pnpm',
-      '--version',
-    ]);
+    expect(runner).toHaveBeenCalledWith('cmd.exe', ['/d', '/s', '/c', 'pnpm', '--version']);
   });
 
   it('returns fail with fixHint when pnpm is not on PATH', async () => {
